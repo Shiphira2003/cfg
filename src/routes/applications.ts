@@ -18,10 +18,9 @@ router.post(
     async (req: AuthRequest, res: Response, next: NextFunction) => {
         try {
             const { cycle_year, amount_requested } = req.body;
-
-            // 🔐 Get student via logged-in user
             const userId = req.user!.userId;
 
+            // 1️⃣ Get student_id for the logged-in user
             const studentResult = await pool.query(
                 "SELECT id FROM students WHERE user_id = $1",
                 [userId]
@@ -36,6 +35,7 @@ router.post(
 
             const student_id = studentResult.rows[0].id;
 
+            // 2️⃣ Validate input
             if (!cycle_year || !amount_requested) {
                 return res.status(400).json({
                     success: false,
@@ -43,24 +43,55 @@ router.post(
                 });
             }
 
+            // 3️⃣ Handle uploaded files
             const files = (req.files as Express.Multer.File[]) || [];
             const documentUrls = files.map(file => file.path);
 
+            // 4️⃣ Insert new application
             const result = await pool.query(
                 `
-                    INSERT INTO applications
-                        (student_id, cycle_year, amount_requested, document_url)
-                    VALUES ($1, $2, $3, $4)
-                        RETURNING *
+                INSERT INTO applications
+                    (student_id, cycle_year, amount_requested, document_url)
+                VALUES ($1, $2, $3, $4)
+                RETURNING *
                 `,
                 [student_id, cycle_year, amount_requested, JSON.stringify(documentUrls)]
             );
 
+            const newApplicationId = result.rows[0].id;
+
+            // 5️⃣ Update TAADA flag immediately after submission
+            await pool.query(`
+                UPDATE applications a
+                SET taada_flag = CASE
+                    -- Already funded before
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM applications ap
+                        JOIN disbursements d ON ap.id = d.allocation_id
+                        WHERE ap.student_id = a.student_id AND d.status = 'APPROVED'
+                    ) THEN 'ALREADY_FUNDED'
+
+                    -- Rejected before
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM applications ap
+                        WHERE ap.student_id = a.student_id AND ap.status = 'REJECTED'
+                    ) THEN 'REJECTED_BEFORE'
+
+                    -- First-time applicant
+                    ELSE 'FIRST_TIME'
+                END
+                WHERE a.id = $1
+            `, [newApplicationId]);
+
+            // 6️⃣ Return response to student
             res.status(201).json({
                 success: true,
                 message: "Application submitted successfully",
                 data: result.rows[0],
             });
+
         } catch (err) {
             next(err);
         }
@@ -92,10 +123,11 @@ router.get(
                     a.amount_requested,
                     a.amount_allocated,
                     a.status,
+                    a.taada_flag,
                     a.document_url,
                     a.created_at
                 FROM applications a
-                JOIN students s ON a.student_id = s.id
+                         JOIN students s ON a.student_id = s.id
             `;
 
             const values: any[] = [];
@@ -105,7 +137,17 @@ router.get(
                 values.push(status);
             }
 
-            query += " ORDER BY a.created_at DESC";
+            // ✅ Sort by TAADA priority first, then newest applications
+            query += `
+                ORDER BY
+                    CASE a.taada_flag
+                        WHEN 'FIRST_TIME' THEN 1
+                        WHEN 'REJECTED_BEFORE' THEN 2
+                        WHEN 'ALREADY_FUNDED' THEN 3
+                        ELSE 4
+                    END,
+                    a.created_at DESC
+            `;
 
             const result = await pool.query(query, values);
 
@@ -182,11 +224,10 @@ router.patch(
     async (req: AuthRequest, res: Response, next: NextFunction) => {
         try {
             const { id } = req.params;
-            const { status, amount_allocated } = req.body;// admin_id is the user performing the action
-
+            const { status, amount_allocated } = req.body;
             const admin_id = req.user!.userId;
 
-            // Validate status
+            // 1️⃣ Validate status
             if (!["APPROVED", "REJECTED"].includes(status)) {
                 return res.status(400).json({
                     success: false,
@@ -194,7 +235,7 @@ router.patch(
                 });
             }
 
-            // 1️⃣ Check if application exists
+            // 2️⃣ Check if application exists
             const appResult = await pool.query(
                 "SELECT * FROM applications WHERE id = $1",
                 [id]
@@ -209,7 +250,7 @@ router.patch(
 
             const application = appResult.rows[0];
 
-            // 2️⃣ Check if score exists
+            // 3️⃣ Check if score exists
             const scoreResult = await pool.query(
                 "SELECT * FROM application_scores WHERE application_id = $1",
                 [id]
@@ -222,7 +263,7 @@ router.patch(
                 });
             }
 
-            // 3️⃣ If approved, amount_allocated is mandatory
+            // 4️⃣ If approved, amount_allocated is mandatory
             if (status === "APPROVED" && (!amount_allocated || amount_allocated <= 0)) {
                 return res.status(400).json({
                     success: false,
@@ -232,57 +273,67 @@ router.patch(
 
             const finalAmount = status === "APPROVED" ? amount_allocated : 0;
 
-            // 4️⃣ Store old and new values for audit log
+            // 5️⃣ Store old and new values for audit log
             const old_value = {
                 status: application.status,
                 amount_allocated: application.amount_allocated,
             };
 
             const new_value = {
-                status: status,
+                status,
                 amount_allocated: finalAmount,
             };
 
-            // 5️⃣ Update application
+            // 6️⃣ Update application
             const updateResult = await pool.query(
                 `
-                UPDATE applications
-                SET 
-                    status = $1,
-                    amount_allocated = $2
-                WHERE id = $3
-                RETURNING 
-                    id,
-                    student_id,
-                    cycle_year,
-                    amount_requested,
-                    amount_allocated,
-                    status,
-                    created_at
+                    UPDATE applications
+                    SET
+                        status = $1,
+                        amount_allocated = $2
+                    WHERE id = $3
+                        RETURNING *
                 `,
                 [status, finalAmount, id]
             );
 
-            // 6️⃣ Insert audit log
+            // 7️⃣ Insert audit log
             await pool.query(
                 `
-                INSERT INTO audit_logs (user_id, application_id, action, old_value, new_value)
-                VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO audit_logs (user_id, application_id, action, old_value, new_value)
+                    VALUES ($1, $2, $3, $4, $5)
                 `,
                 [
-                    admin_id,              // user_id from request body
-                    id,                    // application_id
-                    status,                // action APPROVED or REJECTED
+                    admin_id,
+                    id,
+                    status,
                     JSON.stringify(old_value),
                     JSON.stringify(new_value),
                 ]
             );
 
+            // 8️⃣ Update TAADA flag based on new status
+            await pool.query(`
+                UPDATE applications
+                SET taada_flag = CASE
+                    WHEN $1 = 'APPROVED' THEN 'ALREADY_FUNDED'
+                    WHEN $1 = 'REJECTED' AND NOT EXISTS (
+                        SELECT 1
+                        FROM applications ap
+                        JOIN disbursements d ON ap.id = d.allocation_id
+                        WHERE ap.student_id = applications.student_id AND d.status = 'APPROVED'
+                    ) THEN 'REJECTED_BEFORE'
+                    ELSE taada_flag
+                END
+                WHERE id = $2
+            `, [status, id]);
+
             res.json({
                 success: true,
-                message: "Application updated and logged successfully",
+                message: "Application updated, audit logged, and TAADA flag set successfully",
                 data: updateResult.rows[0],
             });
+
         } catch (err) {
             next(err);
         }
