@@ -8,8 +8,8 @@ export function config() {
         env: process.env.NODE_ENV || "development",
 
         // PostgreSQL config
-        dbUser: process.env.DB_USER || "devuser",
-        dbPassword: process.env.DB_PASSWORD || "yourpassword",
+        dbUser: process.env.DB_USER || "postgres",
+        dbPassword: process.env.DB_PASSWORD || "Ciumbe@254",
         dbHost: process.env.DB_HOST || "localhost",
         dbPort: process.env.DB_PORT ? Number(process.env.DB_PORT) : 5432,
         dbName: process.env.DB_NAME || "cfg_db",
