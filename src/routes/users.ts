@@ -3,8 +3,76 @@ import { Router, Request, Response } from "express";
 import bcrypt from "bcrypt"
 // @ts-ignore
 import pool from "../db/db";
+import { authMiddleware } from "../middleware/auth.middleware";
+import { roleMiddleware } from "../middleware/role.middleware";
 
 const router = Router();
+
+// -------------------- POST register admin --------------------
+router.post(
+    "/admin",
+    authMiddleware,
+    roleMiddleware("admin"),
+    async (req: Request, res: Response) => {
+        try {
+            const { full_name, email, password } = req.body;
+
+            if (!email || !password || !full_name) {
+                return res.status(400).json({
+                    success: false,
+                    message: "All fields are required",
+                });
+            }
+
+            // Check if email exists
+            const exists = await pool.query(
+                "SELECT id FROM users WHERE email = $1",
+                [email]
+            );
+
+            if (exists.rowCount! > 0) {
+                return res.status(409).json({
+                    success: false,
+                    message: "Email already exists",
+                });
+            }
+
+            const hashedPassword = await bcrypt.hash(password, 10);
+
+            // Get admin role id
+            const roleRes = await pool.query(
+                "SELECT id FROM roles WHERE name = 'ADMIN'"
+            );
+
+            if (roleRes.rowCount === 0) {
+                return res.status(500).json({
+                    success: false,
+                    message: "Admin role not found",
+                });
+            }
+
+            const adminRoleId = roleRes.rows[0].id;
+
+            const result = await pool.query(
+                `
+                INSERT INTO users (email, password_hash, role_id, is_active)
+                VALUES ($1, $2, $3, true)
+                RETURNING id, email, role_id, is_active, created_at
+                `,
+                [email, hashedPassword, adminRoleId]
+            );
+
+            res.status(201).json({
+                success: true,
+                message: "Admin registered successfully",
+                data: result.rows[0],
+            });
+        } catch (err) {
+            console.error(err);
+            res.status(500).json({ success: false, message: "Server error" });
+        }
+    }
+);
 
 // -------------------- GET all users --------------------
 router.get("/", async (req: Request, res: Response) => {
