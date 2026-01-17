@@ -1,6 +1,12 @@
 import multer, { FileFilterCallback } from "multer";
 import path from "path";
+import fs from "fs";
 import { Request } from "express";
+
+const uploadDir = "uploads";
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir);
+}
 
 // ----------------------------
 // Storage configuration

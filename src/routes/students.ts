@@ -57,4 +57,60 @@ router.post("/register/student", async (req: Request, res: Response) => {
     }
 });
 
+import { authMiddleware, AuthRequest } from "../middleware/auth.middleware";
+import { roleMiddleware } from "../middleware/role.middleware";
+
+// -------------------- GET: Get Student Profile --------------------
+router.get("/profile", authMiddleware, roleMiddleware("student"), async (req: AuthRequest, res: Response) => {
+    try {
+        const userId = req.user!.userId;
+
+        const result = await pool.query(
+            `SELECT * FROM students WHERE user_id = $1`,
+            [userId]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: "Profile not found" });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+// -------------------- PUT: Update Student Profile --------------------
+router.put("/profile", authMiddleware, roleMiddleware("student"), async (req: AuthRequest, res: Response) => {
+    try {
+        const userId = req.user!.userId;
+        const { full_name, institution, course, year_of_study } = req.body;
+
+        const result = await pool.query(
+            `UPDATE students
+             SET full_name = COALESCE($1, full_name),
+                 institution = COALESCE($2, institution),
+                 course = COALESCE($3, course),
+                 year_of_study = COALESCE($4, year_of_study)
+             WHERE user_id = $5
+             RETURNING *`,
+            [full_name, institution, course, year_of_study, userId]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: "Profile not found" });
+        }
+
+        res.json({
+            message: "Profile updated successfully",
+            student: result.rows[0]
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
 export default router;

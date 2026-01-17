@@ -98,6 +98,42 @@ router.post(
 );
 
 /* =========================================================
+   GET: List My Applications (Student)
+========================================================= */
+router.get(
+    "/my-applications",
+    authMiddleware,
+    roleMiddleware("student"),
+    async (req: AuthRequest, res: Response, next: NextFunction) => {
+        try {
+            const userId = req.user!.userId;
+
+            const result = await pool.query(
+                `
+                SELECT
+                    a.id,
+                    a.cycle_year,
+                    a.amount_requested,
+                    a.amount_allocated,
+                    a.status,
+                    a.taada_flag,
+                    a.created_at
+                FROM applications a
+                JOIN students s ON a.student_id = s.id
+                WHERE s.user_id = $1
+                ORDER BY a.created_at DESC
+                `,
+                [userId]
+            );
+
+            res.json(result.rows);
+        } catch (err) {
+            next(err);
+        }
+    }
+);
+
+/* =========================================================
    GET: List applications (Admin / Committee)
 ========================================================= */
 router.get(
